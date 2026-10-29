@@ -1,0 +1,105 @@
+# Tests + cobertura + análisis en SonarQube (https://sonar.sincro.pe) y espera del Quality Gate (PLAT-2484).
+# El check que se marca como requerido en cada repo es "<job del caller> / Quality Gate".
+name: Sonar
+
+on:
+  workflow_call:
+    inputs:
+      stack:
+        description: "maven | node | php"
+        type: string
+        required: true
+      project-key:
+        type: string
+        required: true
+      test-command:
+        description: "Corre los tests y deja el reporte de cobertura donde lo espera sonar-project.properties / pom.xml"
+        type: string
+        required: true
+      java-version:
+        type: string
+        default: "21"
+      node-version:
+        type: string
+        default: "20"
+      php-version:
+        type: string
+        default: "8.2"
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sonar:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Sonar necesita el historial para calcular el código nuevo
+
+      - if: inputs.stack == 'maven'
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+
+      - if: inputs.stack == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+      - if: inputs.stack == 'node'
+        run: npm ci
+
+      - if: inputs.stack == 'php'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ inputs.php-version }}
+          coverage: xdebug
+      - if: inputs.stack == 'php'
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Tests y cobertura
+        run: ${{ inputs.test-command }}
+
+      # El branch plugin necesita los parámetros del PR explícitos (y el SHA de la cabeza, no el merge commit)
+      # para decorar el PR; en push se analiza la rama.
+      - name: Parámetros del análisis
+        id: args
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD: ${{ github.head_ref }}
+          PR_BASE: ${{ github.base_ref }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+          PROJECT_KEY: ${{ inputs.project-key }}
+        run: |
+          if [ -n "$PR_NUMBER" ]; then
+            a="-Dsonar.pullrequest.key=$PR_NUMBER -Dsonar.pullrequest.branch=$PR_HEAD -Dsonar.pullrequest.base=$PR_BASE -Dsonar.scm.revision=$PR_SHA"
+          else
+            a="-Dsonar.branch.name=$GITHUB_REF_NAME"
+          fi
+          echo "value=-Dsonar.projectKey=$PROJECT_KEY -Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=600 $a" >> "$GITHUB_OUTPUT"
+
+      # Por env y no ${{ }} en el script: el nombre de la rama del PR no debe llegar a parsearse como shell.
+      - name: Análisis (Maven)
+        if: inputs.stack == 'maven'
+        env:
+          SONAR_ARGS: ${{ steps.args.outputs.value }}
+        run: mvn -B --no-transfer-progress sonar:sonar -Dsonar.host.url="$SONAR_HOST_URL" $SONAR_ARGS
+
+      - name: Análisis
+        if: inputs.stack != 'maven'
+        uses: SonarSource/sonarqube-scan-action@v8
+        with:
+          args: ${{ steps.args.outputs.value }}

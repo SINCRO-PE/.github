@@ -37,6 +37,15 @@ permissions:
 jobs:
   sonar:
     name: Quality Gate
+    # PLAT-2503: los PR de promoción (develop -> main) y back-merge (main -> develop) traen código que ya se
+    # analizó en el push a la rama de origen. El skip va aquí y no en el caller: un job omitido por `if`
+    # reporta "Quality Gate" como skipped y satisface el check requerido; si se omitiera el job del caller,
+    # el check "<job> / Quality Gate" nunca aparecería y el PR quedaría bloqueado.
+    if: >-
+      ${{ !(github.event_name == 'pull_request'
+        && github.event.pull_request.head.repo.full_name == github.repository
+        && ((github.head_ref == 'develop' && github.base_ref == 'main')
+          || (github.head_ref == 'main' && github.base_ref == 'develop'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

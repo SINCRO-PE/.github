@@ -35,17 +35,43 @@ permissions:
   contents: read
 
 jobs:
-  sonar:
-    name: Quality Gate
-    # PLAT-2503: los PR de promoción (develop -> main) y back-merge (main -> develop) traen código que ya se
-    # analizó en el push a la rama de origen. El skip va aquí y no en el caller: un job omitido por `if`
-    # reporta "Quality Gate" como skipped y satisface el check requerido; si se omitiera el job del caller,
-    # el check "<job> / Quality Gate" nunca aparecería y el PR quedaría bloqueado.
+  # PLAT-2503: un PR de promoción (develop -> main) o back-merge (main -> develop) cuya rama de origen ya contiene a
+  # la de destino produce, al mergear, exactamente el árbol de la rama de origen, que ya se analizó en su push.
+  # Solo en ese caso se omite "Quality Gate". Si las ramas divergen (p. ej. un hotfix en main que develop aún no
+  # tiene), el resultado combinado nunca se probó y el análisis corre completo.
+  promotion:
+    name: Promoción ya analizada
     if: >-
-      ${{ !(github.event_name == 'pull_request'
+      ${{ github.event_name == 'pull_request'
         && github.event.pull_request.head.repo.full_name == github.repository
         && ((github.head_ref == 'develop' && github.base_ref == 'main')
-          || (github.head_ref == 'main' && github.base_ref == 'develop'))) }}
+          || (github.head_ref == 'main' && github.base_ref == 'develop')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      analyzed: ${{ steps.ancestry.outputs.analyzed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: ancestry
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"; then
+            echo "analyzed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "La rama de origen no contiene a la de destino: se analiza el resultado combinado."
+          fi
+
+  sonar:
+    name: Quality Gate
+    needs: promotion
+    # El skip va aquí y no en el caller: un job omitido por `if` reporta "Quality Gate" como skipped y satisface el
+    # check requerido; si se omitiera el job del caller, el check "<job> / Quality Gate" nunca aparecería.
+    # !cancelled(): corre también cuando `promotion` se omitió (no es promoción) o falló.
+    if: ${{ !cancelled() && needs.promotion.outputs.analyzed != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
